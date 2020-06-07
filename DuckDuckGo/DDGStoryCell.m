@@ -8,18 +8,34 @@
 
 #import "DDGFaviconButton.h"
 #import "DDGStoryCell.h"
+#import "DDGStoryFeed.h"
+#import "DDGPopoverViewController.h"
+#import "DDGActivityItemProvider.h"
+#import "DDGActivityViewController.h"
+#import "DDGSafariActivity.h"
+#import "DDGStoriesViewController.h"
+#import "DDGHistoryItem.h"
+#import "DDGStoryMenu.h"
 
 NSString *const DDGStoryCellIdentifier = @"StoryCell";
 
-CGFloat const DDGTitleBarHeight = 35.0f;
 
 @interface DDGStoryCell ()
 
 @property (nonatomic, strong) UIImageView *backgroundImageView;
-@property (nonatomic, strong) UIView *contentBackgroundView;
+@property (nonatomic, strong) UIButton *menuButton;
+@property (nonatomic, strong) UIButton *backupMenuButton;
+@property (nonatomic, strong) UIButton* categoryButton;
+@property (nonatomic, strong) UIButton *backupCategoryButton;
+@property (nonatomic, strong) UIView *titleBackgroundView;
 @property (nonatomic, strong) UIView *dropShadowView;
 @property (nonatomic, strong) UIView *innerShadowView;
+@property (nonatomic, strong) UIView *imageBottomView;
+@property (nonatomic, strong) UILabel* textLabel;
+@property (nonatomic, weak) DDGStoryMenu* menu;
+@property (nonatomic, assign, getter = isRead) BOOL read;
 @property (nonatomic, strong) DDGFaviconButton *faviconButton;
+@property (nonatomic, strong) DDGPopoverViewController* menuPopover;
 
 @end
 
@@ -27,35 +43,78 @@ CGFloat const DDGTitleBarHeight = 35.0f;
 
 #pragma mark -
 
-- (instancetype)init
+- (instancetype)initWithFrame:(CGRect)frame
 {
-    self = [super initWithStyle:UITableViewCellStyleDefault reuseIdentifier:DDGStoryCellIdentifier];
+    self = [super initWithFrame:frame];
     if (self) {
         [self configure];
     }
     return self;
 }
 
+-(NSString*)reuseIdentifier
+{
+    return DDGStoryCellIdentifier;
+}
+
+
+-(void)saveStoryAndClose
+{
+    DDGPopoverViewController* popover = self.menuPopover;
+    
+    [self saveStory];
+    if(popover) {
+        // we should remove the popover if the story has disappeared
+        [popover dismissViewControllerAnimated:TRUE completion:nil];
+    }
+}
+
+
+-(void)share
+{
+    DDGPopoverViewController* popover = self.menuPopover;
+    void(^share)() = ^() {
+        [self.storyDelegate shareStory:self.story fromView:self.menuButton];
+    };
+    if(popover==nil) {
+        share();
+    } else {
+        [popover dismissViewControllerAnimated:TRUE completion:share];
+    }
+}
+
+
+
+-(void)openInBrowser
+{
+    DDGPopoverViewController* popover = self.menuPopover;
+    void(^openInBrowser)() = ^() {
+        [self.storyDelegate openStoryInBrowser:self.story];
+    };
+    if(popover==nil) {
+        openInBrowser();
+    } else {
+        [popover dismissViewControllerAnimated:TRUE completion:openInBrowser];
+    }
+}
+
+
+-(void)removeHistoryItem
+{
+    DDGPopoverViewController* popover = self.menuPopover;
+    void(^removeItem)() = ^() {
+        [self.storyDelegate removeHistoryItem:self.historyItem];
+    };
+    if(popover==nil) {
+        removeItem();
+    } else {
+        [popover dismissViewControllerAnimated:TRUE completion:removeItem];
+    }
+}
+
+
+
 #pragma mark -
-
-- (void)setDisplaysDropShadow:(BOOL)displaysDropShadow
-{
-    _displaysDropShadow = displaysDropShadow;
-    self.clipsToBounds = !displaysDropShadow;
-    [self setNeedsLayout];
-}
-
-- (void)setDisplaysInnerShadow:(BOOL)displaysInnerShadow
-{
-    _displaysInnerShadow = displaysInnerShadow;
-    [self setNeedsLayout];
-}
-
-- (void)setFavicon:(UIImage *)favicon
-{
-    _favicon = favicon;
-    [self.faviconButton setImage:favicon forState:UIControlStateNormal];
-}
 
 - (void)setHighlighted:(BOOL)highlighted animated:(BOOL)animated
 {
@@ -78,49 +137,122 @@ CGFloat const DDGTitleBarHeight = 35.0f;
     // Empty stub!
 }
 
-- (void)setTitle:(NSString *)title
+- (void)setStory:(DDGStory *)story
 {
-    _title = [title copy];
-    [self.textLabel setText:title];
+    _story = story;
+    self.textLabel.text = story.title;
+    [self.categoryButton setTitle:story.category forState:UIControlStateNormal];
+    self.read = story.readValue;
+    if (story.feed) {
+        UIImage* img = story.feed.image;
+        if(img) {
+            [self.faviconButton setImage:img forState:UIControlStateNormal];
+            self.faviconButton.backgroundColor = [UIColor clearColor];
+            self.faviconButton.layer.cornerRadius = 0.0f;
+        } else {
+            [self.faviconButton setImage:img forState:UIControlStateNormal];
+            self.faviconButton.backgroundColor = UIColorFromRGB(0xDDDDDD);
+            self.faviconButton.layer.cornerRadius = 2.0f;
+        }
+        
+    }
 }
+
+- (void)setHistoryItem:(DDGHistoryItem *)historyItem
+{
+    if(historyItem!=nil) {
+        self.story = historyItem.story;
+    }
+    _historyItem = historyItem;
+}
+
+- (void)menuButtonSelected:(id)sender
+{
+    DDGStoryMenu* menu = [[DDGStoryMenu alloc] initWithStoryCell:self];
+    self.menu          = menu;
+    self.menuPopover   = [[DDGPopoverViewController alloc] initWithContentViewController:menu
+                                                                 andTouchPassthroughView:self.touchPassthroughView];
+    self.menuPopover.delegate = self;
+    [self.menuPopover presentPopoverFromView:self.menuButton
+                    permittedArrowDirections:UIPopoverArrowDirectionAny
+                                    animated:TRUE];
+    self.isShowingMenu = YES;
+}
+
+-(void)categoryButtonSelected:(id)sender
+{
+    [self.storyDelegate toggleCategoryPressed:self.story.category onStory:self.story];
+}
+
 
 #pragma mark -
 
 - (void)configure
 {
-    self.displaysDropShadow = NO;
-    self.displaysInnerShadow = NO;
+    self.isShowingMenu    = NO;
+    self.shouldGoToDetail = YES;
+    self.backgroundImageView = [UIImageView new];
+    self.backgroundImageView.contentMode = UIViewContentModeScaleAspectFill;
+    self.backgroundImageView.clipsToBounds = YES;
+    [self.contentView addSubview:self.backgroundImageView];
     
-    UIImageView *backgroundImageView = [UIImageView new];
-    backgroundImageView.contentMode = UIViewContentModeScaleAspectFill;
-    backgroundImageView.clipsToBounds = YES;
-    [self.contentView addSubview:backgroundImageView];
-    self.backgroundImageView = backgroundImageView;
+    // Set the Menu Backup button for a larger trigger area
+    self.backupMenuButton = [UIButton buttonWithType:UIButtonTypeRoundedRect];
+    [self.backupMenuButton addTarget:self action:@selector(menuButtonSelected:) forControlEvents:UIControlEventTouchUpInside];
+    [self.contentView addSubview:self.backupMenuButton];
     
-    UIView *contentBackgroundView = [UIView new];
-    contentBackgroundView.backgroundColor = [UIColor duckLightGray];
-    [self.contentView addSubview:contentBackgroundView];
-    self.contentBackgroundView = contentBackgroundView;
+    self.menuButton = [UIButton buttonWithType:UIButtonTypeCustom];
+    self.menuButton.backgroundColor = [UIColor duckStoryMenuButtonBackground];
+    [self.menuButton setImage:[UIImage imageNamed:@"menu-white"] forState:UIControlStateNormal];
+    self.menuButton.layer.cornerRadius = 4.0f;
+    [self.menuButton addTarget:self action:@selector(menuButtonSelected:) forControlEvents:UIControlEventTouchUpInside];
+    [self.contentView addSubview:self.menuButton];
+    
+    // Set up the backup button first...
+    self.backupCategoryButton = [UIButton buttonWithType:UIButtonTypeRoundedRect];
+    [self.backupCategoryButton addTarget:self action:@selector(categoryButtonSelected:) forControlEvents:UIControlEventTouchUpInside];
+    [self.contentView addSubview:self.backupCategoryButton];
+    
+    self.categoryButton = [UIButton buttonWithType:UIButtonTypeCustom];
+    self.categoryButton.backgroundColor = [UIColor duckStoryMenuButtonBackground];
+    self.categoryButton.titleLabel.textColor = [UIColor whiteColor];
+    self.categoryButton.titleLabel.textAlignment = NSTextAlignmentCenter;
+    //self.categoryLabel.opaque = NO;
+    self.categoryButton.layer.cornerRadius = 4.0f;
+    [self.categoryButton addTarget:self action:@selector(categoryButtonSelected:) forControlEvents:UIControlEventTouchUpInside];
+    [self.contentView addSubview:self.categoryButton];
+    
+    
+    self.titleBackgroundView = [UIView new];
+    self.titleBackgroundView.backgroundColor = [UIColor duckStoryTitleBackground];
+    [self.contentView addSubview:self.titleBackgroundView];
     
     UIView *dropShadowView = [UIView new];
-    dropShadowView.backgroundColor = [UIColor colorWithWhite:0.0f alpha:0.3f];
+    dropShadowView.backgroundColor = [UIColor duckStoryDropShadowColor];
     dropShadowView.opaque = NO;
     [self addSubview:dropShadowView];
     self.dropShadowView = dropShadowView;
     
     UIView *innerShadowView = [UIView new];
-    innerShadowView.backgroundColor = [UIColor colorWithWhite:0.0f alpha:0.3f];
+    innerShadowView.backgroundColor = [UIColor colorWithWhite:0.0f alpha:0.15f];
     innerShadowView.opaque = NO;
     [self.contentView addSubview:innerShadowView];
     self.innerShadowView = innerShadowView;
     
+    UIView *imageBottomView = [UIView new];
+    imageBottomView.backgroundColor = [UIColor colorWithWhite:1.0f alpha:0.35f];
+    imageBottomView.opaque = NO;
+    [self.contentView addSubview:imageBottomView];
+    self.imageBottomView = imageBottomView;
+    
+    self.textLabel = [UILabel new];
     self.textLabel.backgroundColor = [UIColor clearColor];
-    self.textLabel.font = [UIFont fontWithName:@"HelveticaNeue" size:14.0f];
     self.textLabel.numberOfLines = 2;
     self.textLabel.opaque = NO;
+    [self.contentView addSubview:self.textLabel];
     
     DDGFaviconButton *faviconButton = [DDGFaviconButton buttonWithType:UIButtonTypeCustom];
-    faviconButton.frame = CGRectMake(0.0f, 0.0f, 40.0f, 40.0f);
+    faviconButton.frame = CGRectMake(15.0f, 15.0f, 27.0f, 27.0f);
     faviconButton.opaque = NO;
     faviconButton.backgroundColor = [UIColor clearColor];
 #pragma clang diagnostic push
@@ -133,66 +265,54 @@ CGFloat const DDGTitleBarHeight = 35.0f;
 
 #pragma mark -
 
-- (void)layoutSubviews;
+- (void)layoutSubviews
 {
-    //Always call your parents.
+    // Always call your parents.
     [super layoutSubviews];
     
-    //Let's set everything up.
     CGRect bounds = self.contentView.bounds;
+    
+    // adjust the font sizes according to the space available
+    self.categoryButton.titleLabel.font = [UIFont duckStoryCategory];
+    self.textLabel.font = [UIFont duckStoryTitleSmall];
+    
+    CGRect faviconFrame = self.faviconButton.frame;
+    CGFloat textWidth = bounds.size.width - faviconFrame.origin.x  -  faviconFrame.size.width - 30;
+    NSMutableParagraphStyle *paragraphStyle = [NSMutableParagraphStyle new];
+    paragraphStyle.lineBreakMode = NSLineBreakByWordWrapping;
     
     CGRect backgroundImageViewBounds = bounds;
     backgroundImageViewBounds.size.height -= DDGTitleBarHeight;
-    [self.backgroundImageView setFrame:backgroundImageViewBounds];
+    self.backgroundImageView.frame = backgroundImageViewBounds;
     
-    if (self.displaysDropShadow) {
-        CGRect dropShadowBounds = bounds;
-        dropShadowBounds.origin.y = CGRectGetHeight(bounds);
-        dropShadowBounds.size.height = 0.5f;
-        [self.dropShadowView setFrame:dropShadowBounds];
-    }
+    self.innerShadowView.frame = CGRectMake(bounds.origin.x, bounds.origin.y, bounds.size.width, 0.5f);
+    self.imageBottomView.frame = CGRectMake(bounds.origin.x, bounds.origin.y + backgroundImageViewBounds.size.height-0.5, bounds.size.width, 0.5f);
+    self.dropShadowView.frame = CGRectMake(bounds.origin.x, bounds.size.height-0.5, bounds.size.width, 0.5);
     
-    if (self.displaysInnerShadow) {
-        CGRect innerShadowBounds = bounds;
-        innerShadowBounds.size.height = 0.5f;
-        [self.innerShadowView setFrame:innerShadowBounds];
-    }
+    CGRect titleBackgroundFrame = [self.titleBackgroundView frame];
+    titleBackgroundFrame.size.height = bounds.size.height - backgroundImageViewBounds.size.height;
+    titleBackgroundFrame.origin.x = 0;
+    titleBackgroundFrame.origin.y = bounds.size.height - titleBackgroundFrame.size.height;
+    titleBackgroundFrame.size.width = bounds.size.width;
     
-    CGRect faviconFrame = self.faviconButton.frame;    
+    [self.titleBackgroundView setFrame:titleBackgroundFrame];
     
-    CGFloat textWidth = bounds.size.width - faviconFrame.size.width - 16.0;
-    NSMutableParagraphStyle *paragraphStyle = [NSMutableParagraphStyle new];
-    paragraphStyle.lineBreakMode = NSLineBreakByWordWrapping;
-    CGSize textSize = CGRectIntegral([self.textLabel.text boundingRectWithSize:CGSizeMake(textWidth, MAXFLOAT)
-                                                                       options:NSStringDrawingUsesFontLeading | NSStringDrawingUsesLineFragmentOrigin
-                                                                    attributes:@{NSFontAttributeName: self.textLabel.font,
-                                                                                 NSParagraphStyleAttributeName: paragraphStyle}
-                                                                          context:nil]).size;
-    
-    CGRect contentBackgroundFrame = [self.contentBackgroundView frame];
-    CGFloat lineHeight = self.textLabel.font.lineHeight + 2.0;
-    
-    BOOL multiLine = (textSize.height > lineHeight);
-    
-    if (multiLine) {
-        contentBackgroundFrame.size.height = 51.0f;
-    } else {
-        contentBackgroundFrame.size.height = MAX(lineHeight, DDGTitleBarHeight);
-    }
-    
-    contentBackgroundFrame.origin.x = 0;
-    contentBackgroundFrame.origin.y = bounds.size.height - contentBackgroundFrame.size.height;
-    contentBackgroundFrame.size.width = bounds.size.width;
-    
-    [self.contentBackgroundView setFrame:contentBackgroundFrame];
+    CGSize categorySize              = [self.categoryButton sizeThatFits:CGSizeMake(MAXFLOAT, 25)];
+    categorySize.width              += 20; // add some space on either side of the text
+    self.categoryButton.frame       = CGRectMake(bounds.size.width - 40 - 8 - 8 - categorySize.width, 8, categorySize.width, 25);
+    self.backupCategoryButton.frame = CGRectMake(self.categoryButton.frame.origin.x, 0, categorySize.width, 33);
+    self.menuButton.frame           = CGRectMake(bounds.size.width - 40 - 8, 8, 40, 25);
+    CGFloat categoryButtonEndPoint  =  self.categoryButton.frame.size.width+self.categoryButton.frame.origin.x;
+    self.backupMenuButton.frame     = CGRectMake(categoryButtonEndPoint, 0, bounds.size.width-categoryButtonEndPoint, 33);
+    self.categoryButton.hidden      = self.story.category==nil;
     
     CGPoint center = [self.faviconButton center];
-    center.y = CGRectGetMidY(contentBackgroundFrame);
+    center.y = CGRectGetMidY(titleBackgroundFrame);
     [self.faviconButton setCenter:center];
     
-    CGRect textFrame = [self.contentBackgroundView frame];
-    textFrame.origin.y += 1.0;
-    textFrame.origin.x += faviconFrame.size.width;
+    CGRect textFrame = [self.titleBackgroundView frame];
+    //textFrame.origin.y += 1.0;
+    textFrame.origin.x = 57; //+= faviconFrame.size.width;
     textFrame.size.width = textWidth;
         
     self.textLabel.frame = textFrame;
@@ -202,8 +322,17 @@ CGFloat const DDGTitleBarHeight = 35.0f;
 {
     [super prepareForReuse];
     [self.backgroundImageView setImage:nil];
-    self.displaysDropShadow = NO;
-    self.displaysInnerShadow = NO;
+}
+
+#pragma mark - DDGPopoverViewController delegate method
+- (void)popoverControllerDidDismissPopover:(UIPopoverController *)popoverController {
+    self.isShowingMenu = NO;
+}
+
+#pragma mark == Save Story ==
+- (void)saveStory {
+    NSError *saveError;
+    [self.story.managedObjectContext save:&saveError];
 }
 
 @end

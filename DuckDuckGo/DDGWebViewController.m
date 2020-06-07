@@ -10,8 +10,6 @@
 #import "DDGWebViewController.h"
 #import "DDGAddressBarTextField.h"
 #import "DDGBookmarksProvider.h"
-#import "SVProgressHUD.h"
-#import "DDGUnderViewController.h"
 #import "DDGUtility.h"
 #import "DDGStory.h"
 #import "AFNetworking.h"
@@ -22,46 +20,115 @@
 #import "DDGReadabilityToggleActivity.h"
 #import "DDGActivityItemProvider.h"
 #import "DDGSafariActivity.h"
-#import "DDGWebView.h"
+#import "DDGImageActivityItemProvider.h"
+#import "DDGToolbarAndNavigationBarAutohider.h"
+#import "Constants.h"
 
-@interface DDGWebViewController ()
+@interface DDGWebViewController () <UIGestureRecognizerDelegate, DDGToolbarAndNavigationBarAutohiderDelegate> {
+    BOOL _isFavorited;
+    CGPoint lastOffset;
+    CGFloat lastUpwardsScrollDistance;
+}
+
 @property (nonatomic, readwrite) BOOL inReadabilityMode;
+@property UIView* toolbar;
+@property IBOutlet UIButton* backButton;
+@property IBOutlet UIButton* forwardButton;
+@property IBOutlet UIButton* favButton;
+@property IBOutlet UIButton* shareButton;
+@property IBOutlet UIButton* tabsButton;
+@property IBOutlet NSLayoutConstraint* tabBarTopBorderConstraint; // this exists to force the border to be 0.5px
+@property DDGToolbarAndNavigationBarAutohider* toolbarHider;
+@property NSLayoutConstraint* bottomToolbarTopConstraint;
+@property UITapGestureRecognizer *tapGestureRecognizer;
+
+@property BOOL isFavorited;
+
 @end
+
+
+@interface DDGWebView : UIWebView {
+    UIView* _blackHoleView;
+}
+
+@property (nonatomic, weak) DDGWebViewController* webController;
+@property (readonly) UIView* blackHoleView;
+
+@end
+
+
+
+@implementation DDGWebView
+
+
+-(UIView*)blackHoleView {
+    if(_blackHoleView==nil) {
+        _blackHoleView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 1, 1)];
+    }
+    return _blackHoleView;
+}
+
+-(UIView*)hitTest:(CGPoint)tapPoint withEvent:(UIEvent *)event
+{
+
+    // if someone taps the bottom toolbar area, swallow the tap and show the toolbar
+    if(tapPoint.y + 50 > self.frame.size.height) {
+        [self.webController setHideToolbarAndNavigationBar:FALSE forScrollview:self.scrollView];
+        return self.blackHoleView;
+    }
+    return [super hitTest:tapPoint withEvent:event];
+}
+
+@end
+
+
+
 
 @implementation DDGWebViewController
 
-#pragma mark - View lifecycle
-
-- (void)loadView {
-    self.view = [[UIView alloc] initWithFrame:[[UIScreen mainScreen] applicationFrame]];
-    self.view.autoresizingMask = (UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight);    
+-(UIView*)alternateToolbar {
+    if([self view]) return self.toolbar;
+    return nil;
 }
 
-- (DDGWebView *)webView {
-    if (nil == _webView) {
-        DDGWebView *webView = [[DDGWebView alloc] initWithFrame:self.view.bounds];
-        webView.autoresizingMask = (UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight);
-        webView.delegate = self;
-        
-        webView.scalesPageToFit = YES;
-        _webViewLoadingDepth = 0;
-        webView.backgroundColor = [UIColor duckNoContentColor]; //[UIColor colorWithRed:0.204 green:0.220 blue:0.251 alpha:1.000];
-        
-        [self.view addSubview:webView];
-        _webView = webView;
-    }
-        
-    return _webView;
+- (void)setUpWebToolBar {
+    [[UINib nibWithNibName:@"DDGWebToolbar" bundle:nil] instantiateWithOwner:self options:nil];
+    [self.view addSubview:self.webToolbar];
+    [self.view addConstraint:[NSLayoutConstraint constraintWithItem:self.webToolbar
+                                                          attribute:NSLayoutAttributeLeading
+                                                          relatedBy:NSLayoutRelationEqual
+                                                             toItem:self.view
+                                                          attribute:NSLayoutAttributeLeading
+                                                         multiplier:1 constant:0]];
+    [self.view addConstraint:[NSLayoutConstraint constraintWithItem:self.webToolbar
+                                                          attribute:NSLayoutAttributeTrailing
+                                                          relatedBy:NSLayoutRelationEqual
+                                                             toItem:self.view
+                                                          attribute:NSLayoutAttributeTrailing
+                                                         multiplier:1 constant:0]];
+    self.bottomToolbarTopConstraint = [NSLayoutConstraint constraintWithItem:self.webToolbar
+                                                                   attribute:NSLayoutAttributeBottom
+                                                                   relatedBy:NSLayoutRelationEqual
+                                                                      toItem:self.view
+                                                                   attribute:NSLayoutAttributeBottom
+                                                                  multiplier:1 constant:0];
+    [self.view addConstraint:self.bottomToolbarTopConstraint];
 }
 
 // Implement viewDidLoad to do additional setup after loading the view, typically from a nib.
 - (void)viewDidLoad
 {
     [super viewDidLoad];
+    self.tabBarTopBorderConstraint.constant = 0.5f;
+    UIMenuItem *search = [[UIMenuItem alloc] initWithTitle:NSLocalizedString(@"Search", @"Search") action:@selector(search:)];
+    [[UIMenuController sharedMenuController] setMenuItems:@[search]];
     
-    UIMenuItem *search = [[UIMenuItem alloc] initWithTitle:@"Search" action:@selector(search:)];
-    UIMenuItem *saveImage = [[UIMenuItem alloc] initWithTitle:@"Save Image" action:@selector(saveImage:)];
-    [[UIMenuController sharedMenuController] setMenuItems:@[search, saveImage]];
+    self.tapGestureRecognizer = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleTap:)];
+    self.tapGestureRecognizer.delegate = self;
+    self.tapGestureRecognizer.numberOfTapsRequired = 1;
+    [self.webView addGestureRecognizer:self.tapGestureRecognizer];
+    
+    self.toolbarHider = [[DDGToolbarAndNavigationBarAutohider alloc] initWithContainerView:self.view scrollView:self.webView.scrollView delegate:self];
 }
 
 - (void)setSearchController:(DDGSearchController *)searchController {
@@ -71,32 +138,48 @@
     _searchController = searchController;
 }
 
+-(void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [self.searchControllerDDG.homeController registerScrollableContent:self.webView.scrollView];
+}
+
 -(void)viewWillDisappear:(BOOL)animated {
     if (self.webView.isLoading)
         [self.webView stopLoading];
 
     [self resetLoadingDepth];
     
-    [super viewWillDisappear:animated];
+    // Bring back the expanded state
+    [self.searchController expandNavigationBar];
     
+    [super viewWillDisappear:animated];
     [UIMenuController sharedMenuController].menuItems = nil;
 }
 
--(void)viewDidDisappear:(BOOL)animated {
-    [super viewDidDisappear:animated];    
-    [self.searchController clearAddressBar];
+-(void)viewDidLayoutSubviews
+{
+    [super viewDidLayoutSubviews];
+    self.webView.scrollView.contentInset = UIEdgeInsetsZero;
+    self.webView.scrollView.scrollIndicatorInsets = UIEdgeInsetsZero;
+    lastOffset = self.webView.scrollView.contentOffset;
+    lastUpwardsScrollDistance = 0;
 }
 
 - (void)dealloc
 {
-    if (self.webView.isLoading)
-        [self.webView stopLoading];
-    
+    self.webView.scrollView.delegate = nil;
     [self resetLoadingDepth];    
     
-	self.webView.delegate = nil;
+    self.tapGestureRecognizer.delegate = nil;
+    [self.view removeGestureRecognizer:self.tapGestureRecognizer];
+    self.tapGestureRecognizer = nil;
+    
+    if([self.webView respondsToSelector:@selector(setDelegate:)]) {
+        [self.webView setDelegate:nil];
+    }
     self.webView = nil;
 	self.webViewURL = nil;
+     
 }
 
 - (void)viewDidUnload
@@ -107,16 +190,78 @@
 - (BOOL)shouldAutorotateToInterfaceOrientation:(UIInterfaceOrientation)interfaceOrientation
 {
     // Return YES for supported orientations
-	if ([[UIDevice currentDevice] userInterfaceIdiom] == UIUserInterfaceIdiomPhone)
-	{
-	    return (interfaceOrientation != UIInterfaceOrientationPortraitUpsideDown);
-	}
+    if ([[UIDevice currentDevice] userInterfaceIdiom] == UIUserInterfaceIdiomPhone) {
+        return (interfaceOrientation != UIInterfaceOrientationPortraitUpsideDown);
+    }
 	return YES;
 }
 
 -(void)willRotateToInterfaceOrientation:(UIInterfaceOrientation)toInterfaceOrientation duration:(NSTimeInterval)duration {
     [self.searchController willRotateToInterfaceOrientation:toInterfaceOrientation duration:duration];
 }
+
+
+#pragma mark - Handle long-press on images
+
+- (void)handleTap:(UITapGestureRecognizer *)recognizer
+{
+    DLog(@"empty tap handler");
+}
+
+#pragma mark - UIGestureRecognizerDelegate
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer
+{
+    if ([otherGestureRecognizer isKindOfClass:[UILongPressGestureRecognizer class]] &&
+            otherGestureRecognizer.state==UIGestureRecognizerStateBegan && 
+            gestureRecognizer.state==UIGestureRecognizerStateFailed) 
+    {
+        CGPoint touchLoc = [otherGestureRecognizer locationInView:self.webView];
+        NSURL* imageURL = [self findImageForTap:touchLoc];
+        if(imageURL!=nil) {
+            [self longPressOnImage:imageURL atLocation:touchLoc];
+            return YES;
+        }
+    }
+    return YES;
+}
+
+
+#pragma mark - Private
+
+-(void)handleLongPress:(UIGestureRecognizer*)sender
+{
+    CGPoint touchLocation = [sender locationInView:self.webView];
+    NSURL* imageURL = [self findImageForTap:touchLocation];
+    if(imageURL) {
+        [self longPressOnImage:imageURL atLocation:touchLocation];
+    }
+}
+
+- (NSURL*)findImageForTap:(CGPoint)tapLocation
+{
+    NSString *javascript = @"var ddg_url = '';" \
+    "var node = document.elementFromPoint(%f, %f);" \
+    "while(node) {" \
+    "  if (node.tagName) {" \
+    "    if(node.tagName.toLowerCase() == 'img' && node.src && node.src.length > 0) {" \
+    "      ddg_url = node.src;" \
+    "      break;" \
+    "    }" \
+    "  }" \
+    "  node = node.parentNode;" \
+    "}";
+    NSString* url = [self.webView stringByEvaluatingJavaScriptFromString:[NSString stringWithFormat:javascript, tapLocation.x, tapLocation.y]];
+    //NSString *url = [self stringByEvaluatingJavaScriptFromString:@"ddg_url"];
+    if(url && url.length > 0 && [DDGUtility looksLikeURL:url]) {
+        NSLog(@" tapped on image: %@", url);
+        return [NSURL URLWithString:url];
+    }
+    return nil;
+}
+
+
+
 
 #pragma mark - Readability Mode
 
@@ -149,47 +294,60 @@
 
 #pragma mark - Actions
 
--(void)searchControllerActionButtonPressed
+-(void)setHideToolbarAndNavigationBar:(BOOL)shouldHide forScrollview:(UIScrollView*)scrollView
+{
+    CGFloat newConstant = shouldHide ? 50 : 0;
+    // if (shouldHide && self.isAStory) {
+    if (shouldHide) {
+        [self.searchController compactNavigationBar];
+    } else {
+        [self.searchController expandNavigationBar];
+    }
+    if(self.bottomToolbarTopConstraint.constant!=newConstant) {
+        self.bottomToolbarTopConstraint.constant = newConstant;
+        CGFloat toolbarBottomInset = shouldHide ? 0 : 50;
+        [UIView animateWithDuration:0.25 animations:^{
+            scrollView.contentInset = UIEdgeInsetsMake(0, 0, toolbarBottomInset, 0);
+            scrollView.scrollIndicatorInsets = UIEdgeInsetsMake(0, 0, toolbarBottomInset, 0);
+            [self.view layoutSubviews];
+        }];
+    }
+}
+
+
+-(BOOL)isFavorited
+{
+    return _isFavorited;
+}
+
+-(void)setIsFavorited:(BOOL)isFavorited
+{
+    if(isFavorited) {
+        [self.favButton setImage:[UIImage imageNamed:@"webbar-fav-active"] forState:UIControlStateNormal];
+    } else {
+        [self.favButton setImage:[UIImage imageNamed:@"webbar-fav"] forState:UIControlStateNormal];
+    }
+    _isFavorited = isFavorited;
+}
+
+-(void)searchControllerActionButtonPressed:(id)sender
 {
     // strip extra params from DDG search URLs
     NSURL *shareURL = self.webViewURL;
-    NSString *query = [self.searchController queryFromDDGURL:shareURL];
-    if(query)
-    {
+    NSString *query = [DDGSearchController queryFromDDGURL:shareURL];
+    NSString *pageTitle = [self.webView stringByEvaluatingJavaScriptFromString:@"document.title"];
+    if(query) {
         NSString *escapedQuery = [query stringByAddingPercentEscapesUsingEncoding:NSUTF8StringEncoding];
         shareURL = [NSURL URLWithString:[@"https://duckduckgo.com/?q=" stringByAppendingString:escapedQuery]];
+    } else if(self.story) {
+        shareURL = self.story.URL;
+        pageTitle = self.story.title;
     }
     
-    NSString *pageTitle = [self.webView stringByEvaluatingJavaScriptFromString:@"document.title"];
-    NSString *feed = [self.webViewURL absoluteString];
-    
-    DDGActivityItemProvider *titleProvider = [[DDGActivityItemProvider alloc] initWithPlaceholderItem:[shareURL absoluteString]];
-    [titleProvider setItem:[NSString stringWithFormat:@"%@: %@\n\nvia DuckDuckGo for iOS\n", pageTitle, shareURL] forActivityType:UIActivityTypeMail];
-    // [NSString stringWithFormat:@"mailto:?subject=%@&body=%@", [pageTitle URLEncodedStringDDG], [[shareURL absoluteString] URLEncodedStringDDG]]
-    
-    DDGSafariActivityItem *urlItem = [DDGSafariActivityItem safariActivityItemWithURL:shareURL];    
+    NSString* shareString = [NSString stringWithFormat:NSLocalizedString(@"%@\n\nvia DuckDuckGo for iOS\n\n", @"%@\n\nvia DuckDuckGo for iOS\n\n"), pageTitle];
     
     NSArray *applicationActivities = @[];
-    NSArray *items = @[titleProvider, urlItem, self];
-    
-    DDGBookmarkActivity *bookmarkActivity = nil;
-    DDGBookmarkActivityItem *bookmarkItem = nil;
-    
-    if (nil != self.story && !self.webView.canGoBack) {
-        bookmarkActivity = [[DDGBookmarkActivity alloc] init];
-        bookmarkItem = [DDGBookmarkActivityItem itemWithStory:self.story];
-        bookmarkActivity.bookmarkActivityState = (self.story.savedValue) ? DDGBookmarkActivityStateUnsave : DDGBookmarkActivityStateSave;
-    } else if (query) {
-        bookmarkActivity = [[DDGBookmarkActivity alloc] init];        
-        bookmarkItem = [DDGBookmarkActivityItem itemWithTitle:query URL:self.webViewURL feed:feed];
-        BOOL bookmarked = [[DDGBookmarksProvider sharedProvider] bookmarkExistsForPageWithURL:self.webViewURL];
-        bookmarkActivity.bookmarkActivityState = (bookmarked) ? DDGBookmarkActivityStateUnsave : DDGBookmarkActivityStateSave;
-    }
-    
-    if (nil != bookmarkActivity && bookmarkItem != nil) {
-        applicationActivities = [applicationActivities arrayByAddingObject:bookmarkActivity];
-        items = [items arrayByAddingObject:bookmarkItem];
-    }
+    NSArray *items = @[shareString, shareURL];
     
     if (self.inReadabilityMode) {
         DDGReadabilityToggleActivity *toggleActivity = [[DDGReadabilityToggleActivity alloc] init];
@@ -202,6 +360,28 @@
     }
     
     DDGActivityViewController *avc = [[DDGActivityViewController alloc] initWithActivityItems:items applicationActivities:applicationActivities];
+    
+    if ( [avc respondsToSelector:@selector(popoverPresentationController)] ) {
+        // iOS8
+        avc.popoverPresentationController.sourceView = sender;
+    }
+    
+    [self presentViewController:avc animated:YES completion:NULL];
+}
+
+-(void)longPressOnImage:(NSURL*)imageURL atLocation:(CGPoint)tapPoint
+{
+    NSArray *applicationActivities = @[];
+    NSArray *items = @[ [[DDGImageActivityItemProvider alloc] initWithImageURL:imageURL ] ];
+                        
+    DDGActivityViewController *avc = [[DDGActivityViewController alloc] initWithActivityItems:items
+                                                                        applicationActivities:applicationActivities];
+    if ( [avc respondsToSelector:@selector(popoverPresentationController)] ) {
+        // iOS8
+        avc.popoverPresentationController.sourceView = self.view;
+        avc.popoverPresentationController.sourceRect = CGRectMake(tapPoint.x, tapPoint.y, 1, 1);
+    }
+    
     [self presentViewController:avc animated:YES completion:NULL];
 }
 
@@ -212,34 +392,104 @@
         [self.searchController.searchBar.searchField becomeFirstResponder];
 }
 
--(void)searchControllerLeftButtonPressed {        
-	if (self.webView.canGoBack) {
+-(IBAction)backButtonPressed:(id)sender {
+    if (self.webView.canGoBack) {
         [self.webView goBack];
     } else if ([self.searchController canPopContentViewController]) {
-        [self.searchController popContentViewControllerAnimated:YES];    
+        [self.searchController popContentViewControllerAnimated:YES];
+    }
+}
+
+-(IBAction)forwardButtonPressed:(id)sender {
+    if (self.webView.canGoForward) {
+        [self.webView goForward];
+    }
+}
+
+-(IBAction)favButtonPressed:(id)sender {
+    NSURL *shareURL = self.webViewURL;
+    NSString *query = [DDGSearchController queryFromDDGURL:shareURL];
+    NSString *feed = [self.webViewURL absoluteString];
+    DDGBookmarkActivityItem* bookmarkItem = nil;
+    if (nil != self.story && !self.webView.canGoBack) { // bookmark the story, since we're at the top level
+        bookmarkItem = [DDGBookmarkActivityItem itemWithStory:self.story];
+    } else if (query) { // bookmark the query that we just used
+        bookmarkItem = [DDGBookmarkActivityItem itemWithTitle:query URL:self.webViewURL feed:feed];
+    } else { // there was no query... just bookmark this page
+        NSString* title = [self.webView stringByEvaluatingJavaScriptFromString:@"document.title"];
+        if(title==nil || [title stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]].length<=0) {
+            title = self.webView.request.URL.absoluteString;
+        }
+        if(title!=nil) {
+            bookmarkItem = [DDGBookmarkActivityItem itemWithTitle:title URL:self.webViewURL feed:feed];
+        }
+    }
+    
+    DDGBookmarksProvider *provider = [DDGBookmarksProvider sharedProvider];
+    if(self.isFavorited) {
+        if (bookmarkItem.story) {
+            bookmarkItem.story.savedValue = NO;
+        } else {
+            [provider unbookmarkPageWithURL:bookmarkItem.URL];
+        }
     } else {
-        [(DDGUnderViewController *)[self.slideOverMenuController menuViewController] searchControllerLeftButtonPressed];
+        if (bookmarkItem.story) {
+            bookmarkItem.story.savedValue = YES;
+        } else {
+            [provider bookmarkPageWithTitle:bookmarkItem.title feed:bookmarkItem.feed URL:bookmarkItem.URL];
+        }
+    }
+    
+    if (nil != bookmarkItem.story) {
+        NSManagedObjectContext *context = bookmarkItem.story.managedObjectContext;
+        [context performBlock:^{
+            NSError *error = nil;
+            if (![context save:&error]) {
+                NSLog(@"error: %@", error);
+            }
+        }];
+    }
+    
+    self.isFavorited = !self.isFavorited;
+}
+
+-(IBAction)shareButtonPressed:(id)sender {
+    [self searchControllerActionButtonPressed:sender];
+}
+
+-(IBAction)tabsButtonPressed:(id)sender {
+    NSLog(@"tabsButtonPressed");
+}
+
+
+
+
+-(void)searchControllerLeftButtonPressed {        
+    if ([self.searchController canPopContentViewController]) {
+        [self.searchController popContentViewControllerAnimated:YES];
     }
 }
 
 -(void)searchControllerStopOrReloadButtonPressed {
-    if(self.webView.isLoading)
+    if(self.webView.isLoading) {
         [self.webView stopLoading];
-    else {
-        if (self.inReadabilityMode)
+    } else {
+        if (self.inReadabilityMode) {
             [self loadStory:self.story readabilityMode:YES];
-        else
+        } else {
             [self.webView reload];
+        }
     }
 }
 
 -(void)loadQueryOrURL:(NSString *)queryOrURLString
 {
     [self view];
-    
     NSString *urlString;
     if([self.searchController isQuery:queryOrURLString])
     {
+        self.isAStory = false;
+        NSLog(@"Is not a story for querystring %@", queryOrURLString);
         // direct query
         urlString = [NSString stringWithFormat:@"https://duckduckgo.com/?q=%@&ko=-1&kl=%@",
                      [queryOrURLString URLEncodedStringDDG], 
@@ -247,11 +497,16 @@
     }
     else
     {
+        self.isAStory = true;
         // a URL entered by user
         urlString = [self.searchController validURLStringFromString:queryOrURLString];
     }
     
     NSURL *url = [NSURL URLWithString:urlString];
+    [self loadWebViewWithUrl:url];
+}
+
+- (void)loadWebViewWithUrl:(NSURL*)url {
     NSURLRequest *request = [DDGUtility requestWithURL:url];
     [self.webView loadRequest:request];
     [self.searchController updateBarWithURL:url];
@@ -259,7 +514,7 @@
 }
 
 - (void)loadJSONForStory:(DDGStory *)story completion:(void (^)(id JSON))completion {
-    
+    self.isAStory = true;
     NSString *urlString = story.articleURLString;
     
     if (nil == urlString) {
@@ -293,35 +548,15 @@
     });
 }
 
-- (NSString *)htmlFromJSON:(id)JSON {
-    if ([JSON isKindOfClass:[NSArray class]]) {
-        
-        NSArray *stories = JSON;
-        if ([stories count] > 0) {
-            NSDictionary *dictionary = [stories objectAtIndex:0];
-            if ([dictionary isKindOfClass:[NSDictionary class]]) {
-                NSString *html = [dictionary objectForKey:@"html"];
-                if ([html isKindOfClass:[NSString class]])
-                    return html;
-            }
-        }
-    }
-    
-    return nil;
-}
 
 -(void)loadStory:(DDGStory *)story readabilityMode:(BOOL)readabilityMode {
     [self view];
     
     if (nil != self.webView.request) {
-        [self.webView removeFromSuperview];
-        
-        if (self.webView.isLoading)
+        if (self.webView.isLoading) {
             [self.webView stopLoading];
+        }
         [self resetLoadingDepth];
-        
-        self.webView.delegate = nil;
-        self.webView = nil;        
     }
     
     void (^htmlDownloaded)(BOOL success) = ^(BOOL success){
@@ -348,17 +583,19 @@
         [context performBlock:^{
             NSError *error = nil;
             BOOL success = [context save:&error];
-            if (!success)
+            if (!success) {
                 NSLog(@"error: %@", error);
+            }
         }];
     };
     
     self.story = story;
     
-    if (readabilityMode && !story.isHTMLDownloaded)
+    if (readabilityMode && !story.isHTMLDownloaded) {
         [self loadJSONForStory:story completion:completion];
-    else
-        completion(nil);    
+    } else {
+        completion(nil);
+    }
 }
 
 #pragma mark - Searching for selected text
@@ -366,33 +603,9 @@
 - (BOOL)canPerformAction:(SEL)action withSender:(id)sender
 {
     if (action == @selector(search:)) {
-        return ![self.searchController.searchBar.searchField isFirstResponder] && ![self.webView tappedImageURL];
-    }
-    if (action == @selector(saveImage:)) {
-        return ([self hasAccessToPhotos] && [self.webView tappedImageURL]);
+        return ![self.searchController.searchBar.searchField isFirstResponder];
     }
     return [super canPerformAction:action withSender:sender];
-}
-
-- (void)saveImage:(UIMenuItem *)menuItem
-{
-    if ([self hasAccessToPhotos]) {
-        NSURLRequest *request = [DDGUtility requestWithURL:[NSURL URLWithString:[self.webView tappedImageURL]]];
-        [[AFImageRequestOperation imageRequestOperationWithRequest:request success:^(UIImage *image) {
-            if (image) {
-                ALAssetsLibrary *library = [ALAssetsLibrary new];
-                [library writeImageToSavedPhotosAlbum:image.CGImage orientation:(ALAssetOrientation)image.imageOrientation completionBlock:^(NSURL *assetURL, NSError *error) {
-                    if (error) {
-                        [[[UIAlertView alloc] initWithTitle:@"Save Imaged Failed"
-                                                    message:@"The image couldn't be saved to your camera roll at this time. Please try again later."
-                                                   delegate:nil
-                                          cancelButtonTitle:@"OK"
-                                          otherButtonTitles:nil, nil] show];
-                    }
-                }];
-            }
-        }] start];
-    }
 }
 
 - (void)search:(UIMenuItem *)menuItem
@@ -405,14 +618,6 @@
 
 -(void)mailComposeController:(MFMailComposeViewController *)controller didFinishWithResult:(MFMailComposeResult)result error:(NSError *)error
 {
-	if(result == MFMailComposeResultSent)
-	{
-		[SVProgressHUD showSuccessWithStatus:@"Mail sent!"];
-	}
-	else if (result == MFMailComposeResultFailed)
-	{
-		[SVProgressHUD showErrorWithStatus:@"Mail send failed!"];
-	}
 	[self dismissViewControllerAnimated:YES completion:NULL];
 }
 
@@ -480,37 +685,49 @@
 
 - (BOOL)webView:(UIWebView *)webView shouldStartLoadWithRequest:(NSURLRequest *)request navigationType:(UIWebViewNavigationType)navigationType
 {
-	if (navigationType == UIWebViewNavigationTypeLinkClicked)
-	{
-		if ([[[request.URL scheme] lowercaseString] isEqualToString:@"mailto"])
-		{
+    if (navigationType == UIWebViewNavigationTypeLinkClicked) {
+        NSDate* ignoreUntil = self.ignoreTapsUntil;
+        if(ignoreUntil && [ignoreUntil compare:[NSDate new]]==NSOrderedDescending) return NO; // ignore clicks within a certain range
+        
+		if ([[[request.URL scheme] lowercaseString] isEqualToString:@"mailto"]) {
 			// user is interested in mailing so use the internal mail API
 			[self performSelector:@selector(internalMailAction:) withObject:request.URL afterDelay:0.005];
 			return NO;
 		}
 	}
     
-    // NSLog(@"shouldStartLoadWithRequest: %@ navigationType: %i", request, navigationType);
-    
-    [self updateBarWithRequest:request];
-    
+    //NSLog(@"shouldStartLoadWithRequest: %@ navigationType: %i", request, navigationType);
 	return YES;
+}
+
+
+-(void)updateButtons {
+    self.backButton.enabled = self.webView.canGoBack || self.navigationController.viewControllers.count>1;
+    self.forwardButton.enabled = self.webView.canGoForward;
+    
+    if (nil != self.story && !self.webView.canGoBack) {
+        // we're at the top level of a story, so we can fave/bookmark that story
+        self.isFavorited = self.story.savedValue;
+    } else { //if ([DDGSearchController queryFromDDGURL:self.webViewURL]) {
+        // this is a query that has been favorited/bookmarked
+        self.isFavorited = [[DDGBookmarksProvider sharedProvider] bookmarkExistsForPageWithURL:self.webViewURL];
+    }
 }
 
 - (void)webViewDidStartLoad:(UIWebView *)theWebView
 {
 //    NSLog(@"webViewDidStartLoad events: %i", _webViewLoadEvents);
-    
-    [self.searchController webViewCanGoBack:theWebView.canGoBack];
+    [self updateButtons];
     [self incrementLoadingDepth];
 }
 
 - (void)webViewDidFinishLoad:(UIWebView *)theWebView
 {    
     [self updateBarWithRequest:theWebView.request];
-    [self.searchController webViewCanGoBack:theWebView.canGoBack];
-        
+    //[self.searchController webViewCanGoBack:theWebView.canGoBack];
+    [self updateButtons];
     [self decrementLoadingDepthCancelled:NO];
+
     
 //    NSLog(@"webViewDidFinishLoad events: %i", _webViewLoadEvents);
 }
@@ -569,5 +786,21 @@
     return (status == ALAuthorizationStatusNotDetermined || status == ALAuthorizationStatusAuthorized);
 }
 
-
+#pragma mark == Web Helper Methods ==
+- (NSString *)htmlFromJSON:(id)JSON {
+    if ([JSON isKindOfClass:[NSArray class]]) {
+        
+        NSArray *stories = JSON;
+        if ([stories count] > 0) {
+            NSDictionary *dictionary = [stories objectAtIndex:0];
+            if ([dictionary isKindOfClass:[NSDictionary class]]) {
+                NSString *html = [dictionary objectForKey:@"html"];
+                if ([html isKindOfClass:[NSString class]])
+                    return html;
+            }
+        }
+    }
+    
+    return nil;
+}
 @end
